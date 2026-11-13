@@ -32,11 +32,11 @@
 
 ```bash
 # Cloner le dépôt
-git clone https://github.com/TON_USERNAME/se-contact-scraper.git
-cd se-contact-scraper
+git clone https://github.com/Jimo0x/SE-contact-scraper.git
+cd SE-contact-scraper
 
 # Installer les dépendances
-pip install requests beautifulsoup4 selenium undetected-chromedriver
+pip install -r requirements.txt
 ```
 
 ---
@@ -44,8 +44,22 @@ pip install requests beautifulsoup4 selenium undetected-chromedriver
 ## ▶️ Utilisation
 
 ```bash
-python3 scraper.py
+python3 scraper.py                     # menu interactif (web + LinkedIn)
 ```
+
+### Crawler web en ligne de commande
+
+```bash
+python3 scraper.py https://exemple.com
+python3 scraper.py https://exemple.com -d 3 --delai 1.5 --max-pages 50 -o resultats_audit
+```
+
+| Option | Rôle | Défaut |
+|---|---|---|
+| `-d/--profondeur` | profondeur de crawl | 2 |
+| `--delai` | délai entre requêtes (min 0.5 s) | 1.0 |
+| `--max-pages` | nombre maximum de pages | 100 |
+| `-o/--output` | dossier de sortie | `resultats_<date>` |
 
 ### Menu principal
 
@@ -120,6 +134,8 @@ python3 scraper.py
 se-contact-scraper/
 │
 ├── scraper.py          # Script principal
+├── requirements.txt    # Dépendances
+├── tests/              # Tests (pytest)
 └── README.md           # Documentation
 ```
 
@@ -158,10 +174,19 @@ Génère un rapport standalone (sans dépendance externe) avec :
 
 ## 🛡️ Bonnes pratiques intégrées
 
+- **Respect de `robots.txt`** et **limite de pages** pour ne pas surcharger les sites
 - **Délai aléatoire** entre les requêtes pour ne pas surcharger les serveurs
 - **User-Agent réaliste** pour éviter les blocages basiques
 - **Filtrage des faux positifs** (assets JS/CSS, emails de bibliothèques, etc.)
 - **undetected-chromedriver** pour LinkedIn (contourne les détections de bot)
+- **Mot de passe LinkedIn masqué** à la saisie (`getpass`)
+- **Exports durcis** : le rapport HTML échappe le contenu scrappé (pas de XSS) et le CSV neutralise les formules (`=`, `@`, `+`, `-`) qu'un site piégé pourrait injecter dans Excel
+
+## 🧪 Tests
+
+```bash
+pip install pytest && pytest -q
+```
 
 ---
 
