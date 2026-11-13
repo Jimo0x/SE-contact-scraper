@@ -1,0 +1,5 @@
+requests>=2.31
+beautifulsoup4>=4.12
+# Optionnel, seulement pour le module LinkedIn :
+# selenium>=4.15
+# undetected-chromedriver>=3.5

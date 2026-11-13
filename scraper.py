@@ -2,14 +2,18 @@
 
 import re
 import csv
+import sys
+import html
 import json
 import time
 import random
+import getpass
+import argparse
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.robotparser import RobotFileParser
 from datetime import datetime
-from collections import defaultdict
 import os
 
 # ─────────────────────────────────────────
@@ -85,24 +89,47 @@ def extraire_contacts(html, url):
 def get_liens_internes(html, base_url):
     """Extrait tous les liens internes d'une page."""
     soup = BeautifulSoup(html, "html.parser")
-    domaine = urlparse(base_url).netloc
+    domaine = _hote(base_url)
     liens = set()
 
     for tag in soup.find_all("a", href=True):
-        lien = urljoin(base_url, tag["href"])
-        if urlparse(lien).netloc == domaine:
+        lien = urldefrag(urljoin(base_url, tag["href"]))[0]  # Retire les ancres
+        parsed = urlparse(lien)
+        # Même site (www.exemple.com == exemple.com), http(s) seulement
+        if parsed.scheme in ("http", "https") and _hote(lien) == domaine:
             # Ignore les fichiers non-HTML
-            if not re.search(r"\.(pdf|jpg|png|gif|zip|mp4|css|js)$", lien, re.I):
-                liens.add(lien.split("#")[0])  # Retire les ancres
+            if not re.search(r"\.(pdf|jpe?g|png|gif|svg|webp|zip|mp4|mp3|css|js|ico)$", parsed.path, re.I):
+                liens.add(lien)
 
     return liens
 
-def crawler_site(url_depart, profondeur=2, delai=1.0):
+
+def _hote(url):
+    hote = urlparse(url).netloc.lower().split("@")[-1].split(":")[0]
+    return hote[4:] if hote.startswith("www.") else hote
+
+
+def charger_robots(url_depart):
+    """Lit le robots.txt du site. Retourne une fonction autorise(url) -> bool."""
+    parsed = urlparse(url_depart)
+    rp = RobotFileParser()
+    try:
+        resp = requests.get(f"{parsed.scheme}://{parsed.netloc}/robots.txt", headers=HEADERS, timeout=10)
+        rp.parse(resp.text.splitlines() if resp.status_code == 200 else [])
+    except requests.RequestException:
+        rp.parse([])
+    return lambda url: rp.can_fetch(HEADERS["User-Agent"], url)
+
+def crawler_site(url_depart, profondeur=2, delai=1.0, max_pages=100, respecter_robots=True):
     """
     Crawle un site web jusqu'à une certaine profondeur.
+    Respecte robots.txt et s'arrête après max_pages pages.
     Retourne une liste de contacts trouvés.
     """
-    info(f"Démarrage du crawler sur {url_depart} (profondeur={profondeur})")
+    if not url_depart.startswith(("http://", "https://")):
+        url_depart = "https://" + url_depart
+    info(f"Démarrage du crawler sur {url_depart} (profondeur={profondeur}, max {max_pages} pages)")
+    autorise = charger_robots(url_depart) if respecter_robots else (lambda url: True)
 
     visites = set()
     a_visiter = {url_depart}
@@ -114,6 +141,13 @@ def crawler_site(url_depart, profondeur=2, delai=1.0):
 
         for url in a_visiter:
             if url in visites:
+                continue
+            if len(visites) >= max_pages:
+                warn(f"Limite de {max_pages} pages atteinte.")
+                break
+            if not autorise(url):
+                warn(f"Ignoré (interdit par robots.txt) : {url}")
+                visites.add(url)
                 continue
             visites.add(url)
 
@@ -245,9 +279,29 @@ def linkedin_scraper(type_cible, cible, email_linkedin, mdp_linkedin):
 # ─────────────────────────────────────────
 # 4. EXPORT CSV
 # ─────────────────────────────────────────
+def cellule_sure(valeur):
+    """Neutralise l'injection de formule CSV (=, @, +, - interprétés par Excel/LibreOffice).
+
+    Les données viennent de pages web : un attaquant peut y placer =HYPERLINK(...) ou
+    =cmd|... Un numéro de téléphone (+229 01 23...) reste intact.
+    """
+    v = str(valeur)
+    if v[:1] in ("=", "@", "\t", "\r") or (v[:1] in ("+", "-") and not re.fullmatch(r"[+\-][\d\s().\-]+", v)):
+        return "'" + v
+    return v
+
+
+class _CsvSur:
+    def __init__(self, writer):
+        self.writer = writer
+
+    def writerow(self, row):
+        self.writer.writerow([cellule_sure(x) for x in row])
+
+
 def export_csv(tous_contacts, fichier="contacts.csv"):
     with open(fichier, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+        writer = _CsvSur(csv.writer(f))
         writer.writerow(["Source", "URL", "Email", "Téléphone", "Nom"])
 
         for c in tous_contacts:
@@ -294,23 +348,24 @@ def generer_rapport(tous_contacts, fichier="rapport.html"):
     date_scan    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Construction des lignes du tableau
+    e = lambda v: html.escape(str(v))  # le contenu scrappé est contrôlé par le site visité
     lignes = ""
     for c in tous_contacts:
         if "emails" in c:
             for email in c.get("emails", []):
-                lignes += f"<tr><td>Web</td><td>{c['url']}</td><td>{email}</td><td>—</td><td>—</td></tr>\n"
+                lignes += f"<tr><td>Web</td><td>{e(c['url'])}</td><td>{e(email)}</td><td>—</td><td>—</td></tr>\n"
             for tel in c.get("telephones", []):
-                lignes += f"<tr><td>Web</td><td>{c['url']}</td><td>—</td><td>{tel}</td><td>—</td></tr>\n"
+                lignes += f"<tr><td>Web</td><td>{e(c['url'])}</td><td>—</td><td>{e(tel)}</td><td>—</td></tr>\n"
             for nom in c.get("noms", []):
-                lignes += f"<tr><td>Web</td><td>{c['url']}</td><td>—</td><td>—</td><td>{nom}</td></tr>\n"
+                lignes += f"<tr><td>Web</td><td>{e(c['url'])}</td><td>—</td><td>—</td><td>{e(nom)}</td></tr>\n"
         else:
-            lignes += (f"<tr><td>{c.get('source','LinkedIn')}</td>"
-                       f"<td>{c.get('url','')}</td>"
-                       f"<td>{c.get('email','—')}</td>"
-                       f"<td>{c.get('tel','—')}</td>"
-                       f"<td>{c.get('nom','—')}</td></tr>\n")
+            lignes += (f"<tr><td>{e(c.get('source','LinkedIn'))}</td>"
+                       f"<td>{e(c.get('url',''))}</td>"
+                       f"<td>{e(c.get('email','—'))}</td>"
+                       f"<td>{e(c.get('tel','—'))}</td>"
+                       f"<td>{e(c.get('nom','—'))}</td></tr>\n")
 
-    html = f"""<!DOCTYPE html>
+    page = f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
@@ -360,7 +415,7 @@ def generer_rapport(tous_contacts, fichier="rapport.html"):
 </html>"""
 
     with open(fichier, "w", encoding="utf-8") as f:
-        f.write(html)
+        f.write(page)
     succes(f"Rapport HTML : {fichier}")
 
 
@@ -381,53 +436,84 @@ def menu():
     return input(f"\n{C.GRAS}>> Choix : {C.RESET}").strip()
 
 
-def main():
+def demander_nombre(question, defaut, type_=int):
+    while True:
+        rep = input(question).strip()
+        if not rep:
+            return defaut
+        try:
+            return type_(rep)
+        except ValueError:
+            erreur("Nombre invalide, réessaie.")
+
+
+def exporter(tous_contacts, dossier=None):
+    if not tous_contacts:
+        warn("Aucun contact trouvé.")
+        return
+    print(f"\n{C.JAUNE}[EXPORT]{C.RESET}")
+    dossier = dossier or f"resultats_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    os.makedirs(dossier, exist_ok=True)
+    export_csv(tous_contacts,  f"{dossier}/contacts.csv")
+    export_json(tous_contacts, f"{dossier}/contacts.json")
+    generer_rapport(tous_contacts, f"{dossier}/rapport.html")
+    print(f"\n{C.CYAN}Résultats sauvegardés dans : {dossier}/{C.RESET}")
+
+
+def menu_interactif():
     tous_contacts = []
     choix = menu()
 
     # ── Web Crawler ──
     if choix == "1":
         url = input(">> URL du site (ex: https://example.com) : ").strip()
-        profondeur = int(input(">> Profondeur de crawl (1=surface, 3=profond) : ") or "2")
-        delai = float(input(">> Délai entre requêtes en secondes (ex: 1.0) : ") or "1.0")
+        profondeur = demander_nombre(">> Profondeur de crawl (1=surface, 3=profond) [2] : ", 2)
+        delai = demander_nombre(">> Délai entre requêtes en secondes [1.0] : ", 1.0, float)
         tous_contacts = crawler_site(url, profondeur, delai)
 
-    # ── LinkedIn Profil ──
-    elif choix == "2":
+    # ── LinkedIn ──
+    elif choix in ("2", "3"):
         email_li = input(">> Ton email LinkedIn : ").strip()
-        mdp_li   = input(">> Ton mot de passe LinkedIn : ").strip()
-        cible    = input(">> URL ou username du profil (ex: johndoe) : ").strip()
-        tous_contacts = linkedin_scraper("profil", cible, email_li, mdp_li)
-
-    # ── LinkedIn Entreprise ──
-    elif choix == "3":
-        email_li = input(">> Ton email LinkedIn : ").strip()
-        mdp_li   = input(">> Ton mot de passe LinkedIn : ").strip()
-        cible    = input(">> URL ou nom de l'entreprise (ex: google) : ").strip()
-        tous_contacts = linkedin_scraper("entreprise", cible, email_li, mdp_li)
+        mdp_li   = getpass.getpass(">> Ton mot de passe LinkedIn (masqué) : ")
+        if choix == "2":
+            cible = input(">> URL ou username du profil (ex: johndoe) : ").strip()
+            tous_contacts = linkedin_scraper("profil", cible, email_li, mdp_li)
+        else:
+            cible = input(">> URL ou nom de l'entreprise (ex: google) : ").strip()
+            tous_contacts = linkedin_scraper("entreprise", cible, email_li, mdp_li)
 
     elif choix == "4":
         print("Bye!")
         return
-
     else:
         erreur("Choix invalide.")
         return
 
-    # ── Export & Rapport ──
-    if tous_contacts:
-        print(f"\n{C.JAUNE}[EXPORT]{C.RESET}")
-        dossier = f"resultats_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        os.makedirs(dossier, exist_ok=True)
+    exporter(tous_contacts)
 
-        export_csv(tous_contacts,  f"{dossier}/contacts.csv")
-        export_json(tous_contacts, f"{dossier}/contacts.json")
-        generer_rapport(tous_contacts, f"{dossier}/rapport.html")
 
-        print(f"\n{C.CYAN}Résultats sauvegardés dans : {dossier}/{C.RESET}")
-    else:
-        warn("Aucun contact trouvé.")
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="SE Contact Scraper — collecte de contacts publics (OSINT). "
+                    "À utiliser uniquement dans un cadre autorisé (audit, test de sensibilisation).",
+        epilog="Sans argument, le menu interactif s'ouvre (crawler web + LinkedIn).",
+    )
+    parser.add_argument("url", nargs="?", help="site à crawler (ex: https://exemple.com)")
+    parser.add_argument("-d", "--profondeur", type=int, default=2, help="profondeur de crawl (défaut : 2)")
+    parser.add_argument("--delai", type=float, default=1.0, help="délai entre requêtes en secondes (défaut : 1.0)")
+    parser.add_argument("--max-pages", type=int, default=100, help="nombre maximum de pages (défaut : 100)")
+    parser.add_argument("-o", "--output", help="dossier de sortie (défaut : resultats_<date>)")
+    args = parser.parse_args(argv)
+
+    if not args.url:
+        menu_interactif()
+        return 0
+    if args.delai < 0.5:
+        warn("Délai minimum : 0.5 s (pour ne pas surcharger le site).")
+        args.delai = 0.5
+    exporter(crawler_site(args.url, args.profondeur, args.delai, args.max_pages), args.output)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
